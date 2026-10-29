@@ -1,0 +1,153 @@
+# Builds the vulnerability feed four times a day and publishes each new
+# version as a GitHub Release. Remotto Server reads
+#   https://github.com/<owner>/<repo>/releases/latest/download/manifest-v2-main.rvf
+# (and the manifest-v2-linux-*.rvf channels of the distributions it manages)
+# and downloads only the deltas it lists.
+name: Publish vulnerability feed
+
+on:
+  schedule:
+    # 00/06/12/18 UTC = 09/15/21/03 JST
+    - cron: "17 0,6,12,18 * * *"
+  workflow_dispatch:
+    inputs:
+      new_lineage:
+        description: Start a new lineage (after rotating the signing key)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-vulnerability-feed
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: ${{ !github.event.repository.fork }}
+    runs-on: ubuntu-24.04
+    # The first run reads every NVD yearly feed and each OSV all.zip.
+    timeout-minutes: 150
+    env:
+      # To publish elsewhere (another repository, or from Gitea Actions), set
+      # these to the public GitHub repository and a token that can write its
+      # releases.
+      PUBLISH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      TAG_PREFIX: feed-
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build and test
+        run: |
+          cargo build --release --locked
+          cargo test --release --locked
+
+      # The CVE Program recommends keeping a clone current with git pull
+      # rather than cloning again: the clone is cached (saved once a day) and
+      # each run fetches only the new commit.
+      - name: Date of the cached CVE records
+        id: cvelist
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: cvelistV5
+          key: cvelist-${{ steps.cvelist.outputs.day }}
+          restore-keys: cvelist-
+
+      - name: Fetch CVE records
+        run: |
+          if [ -d cvelistV5/.git ]; then
+            git -C cvelistV5 fetch --quiet --depth 1 origin main
+            git -C cvelistV5 reset --quiet --hard FETCH_HEAD
+          else
+            git clone --quiet --depth 1 https://github.com/CVEProject/cvelistV5.git cvelistV5
+          fi
+
+      # Source indexes and downloads with their HTTP validators, so that a run
+      # fetches only what changed: unchanged files are answered with 304,
+      # NVD's modified feed and the OSV records listed as changed replace full
+      # downloads, and MSRC documents are fetched when revised. OSV archives
+      # and NVD yearly feeds are left out: they are read again only after a
+      # long gap. Losing the cache costs time, not correctness.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            state/cvelist-index.json.gz
+            state/nvd-index.json.gz
+            state/cpe-names.json.gz
+            state/osv-*.json.gz
+            state/sources
+            !state/sources/osv/*.zip
+            !state/sources/nvd/2*.json.gz
+          key: feed-sources-${{ github.run_id }}
+          restore-keys: feed-sources-
+
+      - name: Restore the previous version's state
+        run: |
+          mkdir -p state
+          releases=$(gh release list --repo "$PUBLISH_REPO" --limit 1 --json tagName --jq length)
+          if [ "$releases" = "0" ]; then
+            echo "No previous release; this run starts a new lineage."
+          else
+            # A transient failure must stop the run, not restart the lineage.
+            gh release download --repo "$PUBLISH_REPO" --pattern state.tar.gz --dir "$RUNNER_TEMP"
+            tar -xzf "$RUNNER_TEMP/state.tar.gz" -C state
+            # Feeds that do not change in this run are republished from these.
+            mkdir -p state/manifests
+            gh release download --repo "$PUBLISH_REPO" --pattern 'manifest*.rvf' --dir state/manifests --clobber
+          fi
+
+      - name: Build the feed
+        env:
+          SIGNING_KEY: ${{ secrets.VULN_FEED_SIGNING_KEY }}
+          NEW_LINEAGE: ${{ inputs.new_lineage && '--new-lineage' || '' }}
+        run: |
+          if [ -z "$SIGNING_KEY" ]; then echo "VULN_FEED_SIGNING_KEY is not set" >&2; exit 1; fi
+          key="$RUNNER_TEMP/signing.pem"
+          (umask 077 && printf '%s\n' "$SIGNING_KEY" > "$key")
+          trap 'rm -f "$key"' EXIT
+          ./target/release/remotto-vuln-feed build \
+            --cvelist cvelistV5 --catalog catalog.toml \
+            --state state --out out --key "$key" --msrc \
+            --release-tag-prefix "$TAG_PREFIX" $NEW_LINEAGE
+
+      - name: Publish the release
+        run: |
+          if [ ! -f out/release.env ]; then echo "No changes; nothing to publish."; exit 0; fi
+          . out/release.env
+          # What the next run needs to continue every lineage; source
+          # indexes travel in the cache and manifests in the release.
+          (cd state && tar -czf ../out/state.tar.gz feed.json published*.json.gz)
+          shopt -s nullglob
+          files=(out/manifest*.rvf out/snapshot*.rvf out/delta-*.rvf out/state.tar.gz)
+          previous=$(gh release view --repo "$PUBLISH_REPO" --json tagName --jq .tagName 2>/dev/null || true)
+          # Tag this commit when publishing here; another repository tags
+          # its default branch, since it does not have this commit.
+          target=()
+          if [ "$PUBLISH_REPO" = "$GITHUB_REPOSITORY" ]; then target=(--target "$GITHUB_SHA"); fi
+          gh release create "$TAG" "${files[@]}" --repo "$PUBLISH_REPO" "${target[@]}" \
+            --title "Vulnerability feed $VERSION" --notes-file NOTICE.md --latest
+          if [ -n "$previous" ] && [ "$previous" != "$TAG" ]; then
+            gh release delete-asset "$previous" state.tar.gz --repo "$PUBLISH_REPO" --yes || true
+          fi
+
+      - name: Delete releases the manifest no longer refers to
+        run: |
+          [ -f out/keep-tags.txt ] || exit 0
+          gh release list --repo "$PUBLISH_REPO" --limit 2000 --json tagName --jq '.[].tagName' |
+            grep "^$TAG_PREFIX" | while read -r tag; do
+              if ! grep -qx "$tag" out/keep-tags.txt; then
+                gh release delete "$tag" --repo "$PUBLISH_REPO" --yes --cleanup-tag
+              fi
+            done

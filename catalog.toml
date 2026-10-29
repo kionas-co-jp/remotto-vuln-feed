@@ -1,0 +1,345 @@
+# Products the vulnerability feed covers.
+#
+# Curated products ([[product]]) are reviewed against real CVE records and
+# endpoint reports:
+#
+#   match           how a Remotto endpoint reports the product (shipped in the
+#                   feed); a Software matcher's `version` converts the reported
+#                   version to the vendor's notation (`java_update`)
+#   cve             CVE "affected" entries, by vendor/product (case-insensitive)
+#   cpe             CPE 2.3 "vendor:product" names; also attaches NVD's ranges
+#                   to CVEs whose CNA gave none
+#   versions        how the CNA writes versions: CVE JSON ranges (default) or
+#                   `latest_per_line`, the newest affected version of each line
+#   msrc            MSRC CVRF product names (with --msrc); only products whose
+#                   fixed builds compare with what endpoints report
+#   office_channels channels and editions of the Microsoft 365 Apps security
+#                   release notes whose fixed builds apply (with --msrc)
+#
+# Every other CPE "vendor:product" with version ranges (from the CNA, CISA or
+# NVD) becomes an inferred product of the "main" channel: its names come from
+# the NVD CPE dictionary, and it matches installed programs of the CPE vendor
+# on Windows and programs whose bundle identifier or name carries the vendor
+# on macOS. Findings are shown as inferred. [[override]] entries adjust them by
+# CPE name:
+#
+#   [[override]]
+#   cpe = "vendor:product"          # escaped as in CPE names
+#   names = ["Program Name"]        # added program names
+#   publishers = ["Publisher Inc."] # accepted besides the CPE vendor
+#   name = "Display Name"
+#   disabled = true                 # stop matching (false positives)
+#   curated = true                  # reviewed: no longer shown as inferred
+#
+# Linux packages are not listed: Debian, Ubuntu, RHEL, AlmaLinux and Rocky
+# Linux advisories (OSV.dev) cover every package of the releases in [linux],
+# published as separate channels.
+#
+# Windows releases are not listed either: they are derived from Microsoft's
+# CVE records ("Windows 11 Version 24H2" with 10.0.26100.x builds).
+#
+# Not curated yet, because their records cannot be compared with what
+# endpoints report: Zoom ("see references" instead of versions), the Python
+# Windows installer (DisplayVersion 3.12.4150.0 encodes the release level),
+# Office for Mac (MSRC builds such as 16.114.26101123 against bundle version
+# 16.114) and Visual Studio (MSRC 17.14.42 against installer builds
+# 17.14.36xxx).
+
+[linux]
+debian = ["11", "12", "13"]
+ubuntu = ["20.04", "22.04", "24.04"]
+rhel = ["8", "9", "10"]
+
+[[product]]
+key = "macos"
+name = "macOS"
+cve = [{ vendor = "Apple", product = "macOS" }]
+match = [{ type = "macos" }]
+
+[[product]]
+key = "google-chrome"
+name = "Google Chrome"
+cve = [{ vendor = "Google", product = "Chrome" }]
+cpe = ["google:chrome"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["Google Chrome"], publishers = ["Google"] },
+    { type = "software", platform = "macos", package_names = ["com.google.Chrome"] },
+]
+
+[[product]]
+key = "microsoft-edge"
+name = "Microsoft Edge"
+cve = [{ vendor = "Microsoft", product = "Microsoft Edge (Chromium-based)" }]
+msrc = ["Microsoft Edge (Chromium-based)"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["Microsoft Edge"], publishers = ["Microsoft"] },
+    { type = "software", platform = "macos", package_names = ["com.microsoft.edgemac"] },
+]
+
+[[product]]
+key = "microsoft-vscode"
+name = "Visual Studio Code"
+cve = [{ vendor = "Microsoft", product = "Visual Studio Code" }]
+cpe = ["microsoft:visual_studio_code"]
+msrc = ["Visual Studio Code"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["Microsoft Visual Studio Code*"], exclude_names = ["*Insiders*"], publishers = ["Microsoft"] },
+    { type = "software", platform = "macos", package_names = ["com.microsoft.VSCode"] },
+]
+
+[[product]]
+key = "microsoft-powertoys"
+name = "Microsoft PowerToys"
+cve = [{ vendor = "Microsoft", product = "Microsoft PowerToys" }]
+cpe = ["microsoft:powertoys"]
+msrc = ["Microsoft PowerToys"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["PowerToys*"], publishers = ["Microsoft"] },
+]
+
+# Click-to-Run Office reports DisplayVersion 16.0.<build>.<revision>. MSI
+# installations ("Microsoft Office Professional Plus 2016", no "- <language>"
+# suffix) keep 16.0.4266.1001 whatever their patches and are not matched.
+#
+# Microsoft 365 Apps and retail editions share the channels' builds, which
+# the monthly security release notes list (MSRC links to them instead).
+# Each edition is a product of its own: their build lines are unrelated, and
+# a line that appears later (LTSC 2021 moved from 14332 to 14334) must not
+# look like an old line of another edition.
+[[product]]
+key = "microsoft-365-apps"
+name = "Microsoft 365 Apps / Office (retail)"
+office_channels = [
+    "Current Channel", "Monthly Channel", "Monthly Enterprise Channel", "Semi-Annual",
+    "Office 2016 Retail", "Office 2019 Retail", "Office 2021 Retail", "Office 2024 Retail",
+    "Microsoft 365 Apps on Windows 7",
+]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["Microsoft 365*- *", "Microsoft Office*- *", "Microsoft Project*- *", "Microsoft Visio*- *"], exclude_names = ["*LTSC*", "*Professional Plus 2019*", "*Standard 2019*"], publishers = ["Microsoft"] },
+]
+
+[[product]]
+key = "microsoft-office-2019-volume"
+name = "Microsoft Office 2019 (volume licensed)"
+office_channels = ["Office 2019 Volume Licensed"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["Microsoft Office Professional Plus 2019*- *", "Microsoft Office Standard 2019*- *"], publishers = ["Microsoft"] },
+]
+
+# LTSC editions: MSRC lists their fixed builds per CVE.
+[[product]]
+key = "microsoft-office-ltsc-2021"
+name = "Microsoft Office LTSC 2021"
+msrc = ["Microsoft Office LTSC 2021 for 32-bit editions", "Microsoft Office LTSC 2021 for 64-bit editions"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["Microsoft Office LTSC*2021*"], publishers = ["Microsoft"] },
+]
+
+[[product]]
+key = "microsoft-office-ltsc-2024"
+name = "Microsoft Office LTSC 2024"
+msrc = ["Microsoft Office LTSC 2024 for 32-bit editions", "Microsoft Office LTSC 2024 for 64-bit editions"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["Microsoft Office LTSC*2024*"], publishers = ["Microsoft"] },
+]
+
+# Oracle lists the newest affected version of each supported release line
+# ("8u451", "17.0.15"); end-of-life lines are not assessed. Java 8 reports
+# DisplayVersion 8.0.4410.7 for 8u441, so the version is read from the name.
+# macOS installs Java outside /Applications, which inventories do not scan.
+# OpenJDK builds of other vendors (Temurin, Corretto) are separate products.
+[[product]]
+key = "oracle-java-se"
+name = "Oracle Java SE"
+versions = "latest_per_line"
+cve = [
+    { vendor = "Oracle", product = "Java" },
+    { vendor = "Oracle Corporation", product = "Java" },
+    { vendor = "Oracle Corporation", product = "Java SE JDK and JRE" },
+    { vendor = "Oracle Corporation", product = "Oracle Java SE" },
+    { vendor = "Oracle Corporation", product = "Oracle Java SE, Oracle GraalVM for JDK, Oracle GraalVM Enterprise Edition" },
+]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["Java * Update *", "Java(TM) SE Development Kit*", "Java SE Development Kit*"], exclude_names = ["Java Auto Updater*"], publishers = ["Oracle"], version = "java_update" },
+]
+
+[[product]]
+key = "mozilla-firefox"
+name = "Mozilla Firefox"
+cve = [{ vendor = "Mozilla", product = "Firefox" }]
+cpe = ["mozilla:firefox"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["Mozilla Firefox*"], exclude_names = ["Mozilla Firefox ESR*"] },
+    { type = "software", platform = "macos", package_names = ["org.mozilla.firefox"] },
+]
+
+[[product]]
+key = "mozilla-firefox-esr"
+name = "Mozilla Firefox ESR"
+cve = [{ vendor = "Mozilla", product = "Firefox ESR" }]
+cpe = ["mozilla:firefox_esr"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["Mozilla Firefox ESR*"] },
+]
+
+[[product]]
+key = "mozilla-thunderbird"
+name = "Mozilla Thunderbird"
+cve = [{ vendor = "Mozilla", product = "Thunderbird" }]
+cpe = ["mozilla:thunderbird"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["Mozilla Thunderbird*"] },
+    { type = "software", platform = "macos", package_names = ["org.mozilla.thunderbird"] },
+]
+
+[[product]]
+key = "adobe-acrobat-reader"
+name = "Adobe Acrobat Reader"
+# Continuous track only; classic-track (2020/2024) installs use other numbers.
+cve = [
+    { vendor = "Adobe", product = "Acrobat Reader" },
+    { vendor = "Adobe", product = "Acrobat Reader DC" },
+]
+cpe = ["adobe:acrobat_reader_dc"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["Adobe Acrobat Reader*", "Adobe Acrobat (64-bit)"], publishers = ["Adobe"] },
+    { type = "software", platform = "macos", package_names = ["com.adobe.Reader"] },
+]
+
+[[product]]
+key = "7-zip"
+name = "7-Zip"
+cve = [{ vendor = "7-Zip", product = "7-Zip" }, { vendor = "Igor Pavlov", product = "7-Zip" }]
+cpe = ["7-zip:7-zip"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["7-Zip*"] },
+]
+
+[[product]]
+key = "winrar"
+name = "WinRAR"
+cve = [{ vendor = "RARLAB", product = "WinRAR" }, { vendor = "win.rar GmbH", product = "WinRAR" }]
+cpe = ["rarlab:winrar"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["WinRAR*"] },
+]
+
+[[product]]
+key = "notepad-plus-plus"
+name = "Notepad++"
+cve = [{ vendor = "notepad-plus-plus", product = "notepad-plus-plus" }, { vendor = "Notepad++", product = "Notepad++" }]
+cpe = ["notepad-plus-plus:notepad\\+\\+"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["Notepad++*"] },
+]
+
+[[product]]
+key = "libreoffice"
+name = "LibreOffice"
+cve = [{ vendor = "The Document Foundation", product = "LibreOffice" }]
+cpe = ["libreoffice:libreoffice"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["LibreOffice*"], exclude_names = ["*Help Pack*"] },
+    { type = "software", platform = "macos", package_names = ["org.libreoffice.script"] },
+]
+
+[[product]]
+key = "vlc"
+name = "VLC media player"
+cve = [{ vendor = "VideoLAN", product = "VLC media player" }, { vendor = "VideoLAN", product = "VLC" }]
+cpe = ["videolan:vlc_media_player"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["VLC media player"] },
+    { type = "software", platform = "macos", package_names = ["org.videolan.vlc"] },
+]
+
+[[product]]
+key = "wireshark"
+name = "Wireshark"
+cve = [{ vendor = "Wireshark Foundation", product = "Wireshark" }]
+cpe = ["wireshark:wireshark"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["Wireshark*"] },
+    { type = "software", platform = "macos", package_names = ["org.wireshark.Wireshark"] },
+]
+
+[[product]]
+key = "putty"
+name = "PuTTY"
+cve = [{ vendor = "PuTTY", product = "PuTTY" }]
+cpe = ["putty:putty", "simon_tatham:putty"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["PuTTY*"] },
+]
+
+[[product]]
+key = "git"
+name = "Git"
+cve = [{ vendor = "git", product = "git" }]
+cpe = ["git-scm:git"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["Git"], publishers = ["The Git Development Community"] },
+]
+
+[[product]]
+key = "nodejs"
+name = "Node.js"
+cve = [{ vendor = "NodeJS", product = "Node" }]
+cpe = ["nodejs:node.js"]
+match = [
+    { type = "software", platform = "windows", sources = ["registry"], names = ["Node.js*"] },
+]
+
+# Inferred products that cannot be compared with what endpoints report.
+[[override]]
+cpe = "python:python"
+# The Windows installer's DisplayVersion (3.12.4150.0) encodes the release
+# level, so 3.12.4 would compare as newer than every 3.12 fix.
+disabled = true
+
+# Program names that differ from the CPE dictionary's titles.
+[[override]]
+cpe = "opera:opera_browser"
+names = ["Opera Stable", "Opera"]
+
+[[override]]
+cpe = "cisco:secure_client"
+names = ["Cisco Secure Client - AnyConnect VPN", "Cisco Secure Client"]
+
+[[override]]
+cpe = "zoom:zoom"
+names = ["zoom.us", "Zoom Workplace"]
+
+[[override]]
+cpe = "iterm2:iterm2"
+names = ["iTerm"]
+
+[[override]]
+cpe = "microsoft:powershell"
+names = ["PowerShell 7-x64", "PowerShell 7-x86", "PowerShell 7"]
+
+[[override]]
+cpe = "oracle:vm_virtualbox"
+names = ["Oracle VirtualBox", "Oracle VM VirtualBox", "VirtualBox"]
+
+[[override]]
+cpe = "filezilla-project:filezilla_client"
+names = ["FileZilla"]
+
+[[override]]
+cpe = "linecorp:line"
+names = ["LINE"]
+publishers = ["LY Corporation", "LINE Corporation"]
+
+[[override]]
+cpe = "spotify:spotify_app"
+names = ["Spotify"]
+
+# The macOS app of Docker Desktop is named "Docker".
+[[override]]
+cpe = "docker:desktop"
+names = ["Docker"]
+
+[[override]]
+cpe = "microsoft:visual_c\\+\\+_redistributable"
+names = ["Microsoft Visual C++ 2015-2022 Redistributable", "Microsoft Visual C++ 2015-2019 Redistributable"]

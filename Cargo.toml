@@ -1,0 +1,30 @@
+[package]
+name = "remotto-vuln-feed"
+version = "1.0.0"
+edition = "2021"
+description = "Builds the signed vulnerability feed that Remotto Server imports"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+base64 = "0.21"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.4", features = ["derive"] }
+csv = "1"
+flate2 = "1.1"
+hex = "0.4"
+rand = "0.8"
+reqwest = { version = "0.11", features = ["rustls-tls"], default-features = false }
+rsa = { version = "0.9", features = ["sha2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = { version = "0.4", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+toml = "0.8"
+uuid = { version = "1", features = ["v4"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+strip = true
