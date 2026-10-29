@@ -1,6 +1,6 @@
 # remotto-vuln-feed
 
-Builds and publishes the signed vulnerability data used by [Remotto](https://remotto.kionas.co.jp). A GitHub Actions workflow builds it regularly and, when anything changed, publishes a new version as a GitHub Release.
+Builds and publishes the signed vulnerability data used by [Remotto](https://kionas.co.jp/en/remotto/). A GitHub Actions workflow builds it regularly and, when anything changed, publishes a new version as a GitHub Release.
 
 Remotto で利用する、署名付きの脆弱性データを作成・公開するツールです。GitHub Actions で定期的に作成し、変更があれば GitHub Releases に新しいバージョンを公開します。
 
