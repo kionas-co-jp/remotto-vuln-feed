@@ -37,9 +37,9 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TAG_PREFIX: feed-
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -59,7 +59,7 @@ jobs:
         id: cvelist
         run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: cvelistV5
           key: cvelist-${{ steps.cvelist.outputs.day }}
@@ -80,7 +80,7 @@ jobs:
       # downloads, and MSRC documents are fetched when revised. OSV archives
       # and NVD yearly feeds are left out: they are read again only after a
       # long gap. Losing the cache costs time, not correctness.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             state/cvelist-index.json.gz
