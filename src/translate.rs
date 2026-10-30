@@ -230,8 +230,24 @@ pub async fn update(
 }
 
 /// Inferred products for CPE "vendor:product" names that no curated product
-/// claims, with their overrides applied.
+/// claims, with their overrides applied. A program name an override adds
+/// names that product only: other products lose it from their dictionary
+/// names, so a "Docker" app (Docker Desktop on macOS) is not also taken for
+/// the Docker Engine, whose versions are numbered differently.
 pub fn products(catalog: &Catalog, names: &Names, wanted: &BTreeSet<String>) -> Vec<Product> {
+    let mut claimed: HashMap<String, Vec<&str>> = HashMap::new();
+    for adjustment in catalog
+        .overrides
+        .iter()
+        .filter(|adjustment| !adjustment.disabled)
+    {
+        for name in &adjustment.names {
+            claimed
+                .entry(software_key(name))
+                .or_default()
+                .push(&adjustment.cpe);
+        }
+    }
     let mut products = Vec::new();
     for vendor_product in wanted {
         if catalog.curated_cpe(vendor_product).is_some() {
@@ -246,6 +262,13 @@ pub fn products(catalog: &Catalog, names: &Names, wanted: &BTreeSet<String>) -> 
             .get(vendor_product)
             .cloned()
             .unwrap_or_else(|| names_of(vendor_product, &[]));
+        aliases.retain(|alias| {
+            claimed.get(alias).map_or(true, |owners| {
+                owners
+                    .iter()
+                    .any(|owner| crate::catalog::same(owner, vendor_product))
+            })
+        });
         let vendor = vendor_product.split(':').next().unwrap_or("");
         let mut publishers = vec![publisher_key(&unescape(vendor).replace('_', " "))];
         let mut name = name;
@@ -419,5 +442,41 @@ curated = true
         };
         assert!(names.contains(&"keepass 2".to_string()));
         assert_eq!(publishers, &vec!["dominik reichl", "keepass"]);
+    }
+
+    #[test]
+    fn names_an_override_adds_belong_to_that_product_only() {
+        let mut names = Names::default();
+        for (cpe, display, keys) in [
+            (
+                "docker:docker",
+                "Docker",
+                vec!["docker", "docker community edition"],
+            ),
+            ("docker:desktop", "Docker Desktop", vec!["docker desktop"]),
+            (
+                "synology:docker",
+                "Synology Docker",
+                vec!["docker", "synology docker"],
+            ),
+        ] {
+            names.products.insert(
+                cpe.into(),
+                (display.into(), keys.into_iter().map(String::from).collect()),
+            );
+        }
+        let wanted: BTreeSet<String> = names.products.keys().cloned().collect();
+        let products = products(&catalog(""), &names, &wanted);
+        let aliases = |key: &str| {
+            let product = products.iter().find(|product| product.key == key).unwrap();
+            let Matcher::Alias { names, .. } = &product.matchers[0] else {
+                panic!()
+            };
+            names.clone()
+        };
+        // catalog.toml gives "Docker" to Docker Desktop.
+        assert_eq!(aliases("cpe:docker:desktop"), ["docker", "docker desktop"]);
+        assert_eq!(aliases("cpe:docker:docker"), ["docker community edition"]);
+        assert_eq!(aliases("cpe:synology:docker"), ["synology docker"]);
     }
 }

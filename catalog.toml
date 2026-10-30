@@ -25,7 +25,9 @@
 #
 #   [[override]]
 #   cpe = "vendor:product"          # escaped as in CPE names
-#   names = ["Program Name"]        # added program names
+#   names = ["Program Name"]        # added program names, which then name
+#                                   # this product only (other inferred
+#                                   # products stop matching them)
 #   publishers = ["Publisher Inc."] # accepted besides the CPE vendor
 #   name = "Display Name"
 #   disabled = true                 # stop matching (false positives)

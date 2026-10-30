@@ -99,7 +99,8 @@ pub struct Catalog {
     pub linux: Linux,
 }
 
-fn same(left: &str, right: &str) -> bool {
+/// Whether two CPE "vendor:product" names are the same.
+pub fn same(left: &str, right: &str) -> bool {
     left.trim().eq_ignore_ascii_case(right.trim())
 }
 
