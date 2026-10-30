@@ -102,8 +102,8 @@ struct BuildArgs {
     /// Use cached downloads only
     #[arg(long)]
     offline: bool,
-    /// Deltas listed in the manifest (240 = 60 days at four builds a day)
-    #[arg(long, default_value_t = 240)]
+    /// Deltas listed in the manifest (120 = 30 days at four builds a day)
+    #[arg(long, default_value_t = 120)]
     keep_deltas: usize,
     /// Start a new lineage; servers then download the snapshot
     #[arg(long)]
