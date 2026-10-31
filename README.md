@@ -11,9 +11,10 @@ The data is split into channels, each a lineage of its own, so that servers down
 | Channel | Contents |
 | --- | --- |
 | `main` | Windows, macOS and applications |
-| `linux-debian` | Debian 11, 12 and 13 packages |
-| `linux-ubuntu` | Ubuntu 20.04, 22.04 and 24.04 LTS packages |
-| `linux-rhel` | RHEL, AlmaLinux and Rocky Linux 8, 9 and 10 packages |
+| `linux-<distribution>-<release>` | Packages of one Linux release, e.g. `linux-ubuntu-26.04`, `linux-debian-13`, `linux-rhel-10`, `linux-almalinux-9`, `linux-rocky-9` |
+| `linux-debian`, `linux-ubuntu`, `linux-rhel` | Every release of the distribution in one channel, for Remotto Server versions before release channels. To be removed |
+
+Linux releases are not listed by hand. A Debian, Ubuntu, RHEL, AlmaLinux or Rocky Linux release gets a channel while its distribution publishes advisories for it, so a new release appears with its first advisories. A release ends its channel one year after its last advisory: its manifest then leaves the latest release, and Remotto Server reports the release as not covered by the data. Distributions publish new advisories only for the releases they support, while old advisories keep being modified for every release they name, so the publication date of the advisories decides.
 
 Every release holds the manifest of every channel; snapshots and deltas are attached to the release in which they were built.
 
@@ -24,7 +25,7 @@ Every release holds the manifest of every channel; snapshots and deltas are atta
 | `delta-v2-<channel>-<from>-<to>.rvf` | Changes from one version to the next |
 | `state.tar.gz` | What the next build continues from (latest release only) |
 
-Remotto Server checks `https://github.com/kionas-co-jp/remotto-vuln-feed/releases/latest/download/manifest-v2-main.rvf`, plus the Linux manifests next to it for the distributions it manages, and downloads only the deltas it lacks. For an offline server, download the `snapshot-v2-*.rvf` files of the latest release and import them in the Remotto console.
+Remotto Server checks `https://github.com/kionas-co-jp/remotto-vuln-feed/releases/latest/download/manifest-v2-main.rvf`, plus the manifests next to it of the Linux releases it and its devices run, and downloads only the deltas it lacks. For an offline server, download `snapshot-v2-main.rvf` and the `snapshot-v2-linux-<distribution>-<release>.rvf` files of the releases you use from the latest release and import them in the Remotto console.
 
 ## How the data is built
 

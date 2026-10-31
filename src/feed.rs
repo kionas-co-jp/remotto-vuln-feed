@@ -35,12 +35,16 @@ pub enum Kind {
     Manifest,
 }
 
-/// The channel of Windows, macOS and application data; Linux distributions
-/// have their own (`linux_channel`).
+/// The channel of Windows, macOS and application data; each Linux release
+/// has its own (`release_channel`).
 pub const MAIN_CHANNEL: &str = "main";
 
-/// Every channel.
-pub const CHANNELS: &[&str] = &[MAIN_CHANNEL, "linux-debian", "linux-ubuntu", "linux-rhel"];
+/// Channels that held every release of a distribution before each release
+/// got its own (`linux_channel`). Still published for older servers.
+pub const LEGACY_LINUX_CHANNELS: &[&str] = &["linux-debian", "linux-ubuntu", "linux-rhel"];
+
+/// Distributions with release channels, as `linux_release` names them.
+const LINUX_DISTROS: &[&str] = &["debian", "ubuntu", "rhel", "almalinux", "rocky"];
 
 fn main_channel() -> String {
     MAIN_CHANNEL.into()
@@ -796,7 +800,7 @@ fn macos_version(os_version: &str) -> Option<&str> {
         .find(|part| part.starts_with(|c: char| c.is_ascii_digit()))
 }
 
-/// Channel holding the data of a `linux_release` distribution.
+/// Legacy channel that held every release of a `linux_release` distribution.
 pub fn linux_channel(distro: &str) -> Option<&'static str> {
     match distro {
         "debian" => Some("linux-debian"),
@@ -804,6 +808,39 @@ pub fn linux_channel(distro: &str) -> Option<&'static str> {
         "rhel" | "almalinux" | "rocky" => Some("linux-rhel"),
         _ => None,
     }
+}
+
+/// Channel of one `linux_release`, e.g. "linux-ubuntu-26.04". The feed
+/// publishes one for every release still receiving advisories, so servers
+/// need no update when a distribution ships a new release.
+pub fn release_channel(distro: &str, release: &str) -> String {
+    format!("linux-{distro}-{release}")
+}
+
+/// Distribution and release of a `release_channel`.
+pub fn channel_release(channel: &str) -> Option<(&str, &str)> {
+    let (distro, release) = channel.strip_prefix("linux-")?.split_once('-')?;
+    let numeric = release.starts_with(|c: char| c.is_ascii_digit())
+        && release.bytes().all(|b| b.is_ascii_digit() || b == b'.');
+    (LINUX_DISTROS.contains(&distro) && numeric).then_some((distro, release))
+}
+
+/// Whether servers import data of `channel`: "main" and release channels.
+pub fn is_channel(channel: &str) -> bool {
+    channel == MAIN_CHANNEL || channel_release(channel).is_some()
+}
+
+/// Display name of a release, e.g. "Ubuntu 26.04".
+pub fn release_name(distro: &str, release: &str) -> String {
+    let name = match distro {
+        "debian" => "Debian",
+        "ubuntu" => "Ubuntu",
+        "rhel" => "RHEL",
+        "almalinux" => "AlmaLinux",
+        "rocky" => "Rocky Linux",
+        other => other,
+    };
+    format!("{name} {release}")
 }
 
 /// Distribution and release a Linux `os_build` ("ubuntu:24.04",
@@ -1782,6 +1819,27 @@ mod tests {
         assert_eq!(linux_release("rhel:10.0"), Some(("rhel", "10".into())));
         assert_eq!(linux_release("fedora:40"), None);
         assert_eq!(linux_release("26100.6899"), None);
+    }
+
+    #[test]
+    fn each_linux_release_has_a_channel() {
+        let (distro, release) = linux_release("ubuntu:26.04").unwrap();
+        let channel = release_channel(distro, &release);
+        assert_eq!(channel, "linux-ubuntu-26.04");
+        assert_eq!(channel_release(&channel), Some(("ubuntu", "26.04")));
+        assert_eq!(channel_release("linux-rocky-10"), Some(("rocky", "10")));
+        assert!(is_channel("main"));
+        assert!(is_channel("linux-almalinux-9"));
+        // Legacy, unknown and malformed channels.
+        for channel in [
+            "linux-ubuntu",
+            "linux-fedora-40",
+            "linux-debian-",
+            "linux-debian-sid",
+        ] {
+            assert!(!is_channel(channel), "{channel}");
+        }
+        assert_eq!(release_name("rocky", "9"), "Rocky Linux 9");
     }
 
     fn inferred(key: &str, names: &[&str], publishers: &[&str]) -> Product {

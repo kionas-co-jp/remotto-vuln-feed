@@ -424,10 +424,18 @@ fn add_nvd(
     }
 }
 
-/// Linux channel of a Linux product key ("deb:debian:12:openssl").
-fn linux_channel(product: &str) -> &'static str {
-    let distro = product.split(':').nth(1).unwrap_or("");
-    feed::linux_channel(distro).unwrap_or("linux-rhel")
+/// A Linux release is published while its distribution still issues
+/// advisories for it; it stops a year after the last one.
+const ACTIVE_RELEASE_DAYS: i64 = 365;
+
+/// Channels of a Linux product key ("deb:debian:12:openssl"): its release
+/// channel and the legacy channel of its distribution.
+fn linux_channels(product: &str) -> Option<(String, &'static str)> {
+    let (distro, release) = osv::release_of(product)?;
+    Some((
+        feed::release_channel(distro, release),
+        feed::linux_channel(distro)?,
+    ))
 }
 
 fn order(kind: RecordKind) -> u8 {
@@ -643,6 +651,8 @@ struct Gathered {
     nvd: nvd::Index,
     /// Affected versions of Linux packages per (CVE, product).
     linux: BTreeMap<(String, String), Vec<feed::Span>>,
+    /// Linux (distribution, release) pairs still receiving advisories.
+    linux_releases: BTreeSet<(String, String)>,
     index: cvelist::Index,
     /// Records of CVEs that only Microsoft's data names.
     extra: BTreeMap<String, cvelist::Parsed>,
@@ -688,23 +698,27 @@ async fn gather(args: &BuildArgs, catalog: &catalog::Catalog, full: bool) -> Res
         write_gzip_json(&nvd_path, &nvd)?;
     }
     let mut linux = BTreeMap::new();
+    let mut linux_releases = BTreeSet::new();
     if !args.no_linux {
         let mut indexes = Vec::new();
         for source in osv::SOURCES {
-            indexes.push(
-                osv::update(
-                    &client,
-                    &cache,
-                    &args.state,
-                    source,
-                    catalog,
-                    full,
-                    args.offline,
-                )
-                .await?,
-            );
+            indexes
+                .push(osv::update(&client, &cache, &args.state, source, full, args.offline).await?);
         }
-        linux = osv::merge(&indexes.iter().collect::<Vec<_>>());
+        let indexes: Vec<&osv::Index> = indexes.iter().collect();
+        linux = osv::merge(&indexes);
+        linux_releases = osv::active_releases(
+            &indexes,
+            Utc::now() - chrono::Duration::days(ACTIVE_RELEASE_DAYS),
+        );
+        eprintln!(
+            "Linux releases published: {}",
+            linux_releases
+                .iter()
+                .map(|(distro, release)| feed::release_name(distro, release))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 
     // CVE records that NVD or a distribution names, beyond the catalog's.
@@ -757,6 +771,7 @@ async fn gather(args: &BuildArgs, catalog: &catalog::Catalog, full: bool) -> Res
         microsoft,
         nvd,
         linux,
+        linux_releases,
         index,
         extra,
         vendor_products,
@@ -765,12 +780,12 @@ async fn gather(args: &BuildArgs, catalog: &catalog::Catalog, full: bool) -> Res
 }
 
 /// Records of every channel's next version: "main" and, unless skipped, the
-/// Linux channels, which servers read for the distributions they manage.
+/// Linux channels, which servers read for the releases they manage.
 fn assemble(
     catalog: &catalog::Catalog,
     gathered: &Gathered,
     with_linux: bool,
-) -> BTreeMap<&'static str, BTreeMap<String, Record>> {
+) -> BTreeMap<String, BTreeMap<String, Record>> {
     let sources = CveSources {
         index: &gathered.index,
         extra: &gathered.extra,
@@ -792,18 +807,18 @@ fn assemble(
     optional.extend(inferred);
     let mut channels = BTreeMap::new();
     channels.insert(
-        feed::MAIN_CHANNEL,
+        feed::MAIN_CHANNEL.to_string(),
         channel_records(&sources, main, listed, optional, false),
     );
     if with_linux {
-        let mut linux = linux_affected(catalog, &gathered.linux);
-        for channel in feed::CHANNELS
-            .iter()
-            .filter(|channel| channel.starts_with("linux-"))
-        {
-            let (affected, products) = linux.remove(channel).unwrap_or_default();
+        let mut linux = linux_affected(&gathered.linux, &gathered.linux_releases);
+        // Older servers read the legacy channels even when they are empty.
+        for channel in feed::LEGACY_LINUX_CHANNELS {
+            linux.entry(channel.to_string()).or_default();
+        }
+        for (channel, (affected, products)) in linux {
             channels.insert(
-                *channel,
+                channel,
                 channel_records(&sources, affected, Vec::new(), products, true),
             );
         }
@@ -811,29 +826,39 @@ fn assemble(
     channels
 }
 
-/// Linux entries and the products they refer to, per channel.
+/// Linux entries of the active releases and the products they refer to,
+/// per channel: each release's own and its distribution's legacy channel.
 fn linux_affected(
-    catalog: &catalog::Catalog,
     linux: &BTreeMap<(String, String), Vec<feed::Span>>,
-) -> BTreeMap<&'static str, (Entries, Vec<feed::Product>)> {
-    let mut channels: BTreeMap<&str, (Entries, Vec<feed::Product>)> = BTreeMap::new();
+    releases: &BTreeSet<(String, String)>,
+) -> BTreeMap<String, (Entries, Vec<feed::Product>)> {
+    let mut channels: BTreeMap<String, (Entries, Vec<feed::Product>)> = BTreeMap::new();
     for ((cve, product), spans) in linux {
-        channels
-            .entry(linux_channel(product))
-            .or_default()
-            .0
-            .insert(
-                (cve.clone(), product.clone()),
-                Affected {
-                    cve: cve.clone(),
-                    product: product.clone(),
-                    fixed: cvelist::fixed_text(spans),
-                    scheme: osv::scheme(product),
-                    spans: spans.clone(),
-                    default_affected: false,
-                    fix_url: None,
-                },
-            );
+        let Some((distro, release)) = osv::release_of(product) else {
+            continue;
+        };
+        if !releases.contains(&(distro.to_string(), release.to_string())) {
+            continue;
+        }
+        let Some((channel, legacy)) = linux_channels(product) else {
+            continue;
+        };
+        let entry = Affected {
+            cve: cve.clone(),
+            product: product.clone(),
+            fixed: cvelist::fixed_text(spans),
+            scheme: osv::scheme(product),
+            spans: spans.clone(),
+            default_affected: false,
+            fix_url: None,
+        };
+        for channel in [channel, legacy.to_string()] {
+            channels
+                .entry(channel)
+                .or_default()
+                .0
+                .insert((cve.clone(), product.clone()), entry.clone());
+        }
     }
     for (affected, products) in channels.values_mut() {
         let mut keys: Vec<&String> = affected.keys().map(|(_, product)| product).collect();
@@ -841,7 +866,7 @@ fn linux_affected(
         keys.dedup();
         *products = keys
             .into_iter()
-            .filter_map(|key| osv::feed_product(catalog, key))
+            .filter_map(|key| osv::feed_product(key))
             .collect();
     }
     channels
@@ -899,6 +924,26 @@ async fn build(args: BuildArgs) -> Result<()> {
 
     let gathered = gather(&args, &catalog, full).await?;
     let channels = assemble(&catalog, &gathered, !args.no_linux);
+    if !args.no_linux {
+        // A release no longer published leaves the latest release: servers
+        // then find no manifest for it and report the release as uncovered.
+        let ended: Vec<String> = state
+            .channels
+            .keys()
+            .filter(|name| name.starts_with("linux-") && !channels.contains_key(*name))
+            .cloned()
+            .collect();
+        for name in ended {
+            println!("{name} is no longer published");
+            state.channels.remove(&name);
+            let layout = Layout {
+                channel: &name,
+                release: args.release_tag_prefix.is_some(),
+            };
+            let _ = std::fs::remove_file(args.state.join(layout.published()));
+            let _ = std::fs::remove_file(args.state.join("manifests").join(layout.manifest()));
+        }
+    }
 
     let release = state.release.or(state.version).unwrap_or(0) + 1;
     let run = Run {
@@ -914,7 +959,7 @@ async fn build(args: BuildArgs) -> Result<()> {
         keep_deltas: args.keep_deltas,
     };
     let mut changed = false;
-    let mut unchanged = Vec::new();
+    let mut published = BTreeSet::new();
     for (name, records) in &channels {
         let layout = Layout {
             channel: name,
@@ -923,8 +968,7 @@ async fn build(args: BuildArgs) -> Result<()> {
         let channel = state.channels.entry(name.to_string()).or_default();
         if run.publish(&layout, channel, records)? {
             changed = true;
-        } else {
-            unchanged.push(layout);
+            published.insert(name.clone());
         }
     }
     state.catalog_sha256 = Some(catalog_sha256);
@@ -935,9 +979,18 @@ async fn build(args: BuildArgs) -> Result<()> {
     }
     if let (Some(tag), Some(prefix)) = (&run.release_tag, &args.release_tag_prefix) {
         // Every release carries every manifest, since servers read them from
-        // the latest release; unchanged ones are copied as published.
-        for layout in &unchanged {
-            let saved = run.saved_manifest(layout);
+        // the latest release; unchanged ones, and the Linux ones when this
+        // run skips Linux, are copied as published.
+        for name in state
+            .channels
+            .keys()
+            .filter(|name| !published.contains(*name))
+        {
+            let layout = Layout {
+                channel: name,
+                release: true,
+            };
+            let saved = run.saved_manifest(&layout);
             std::fs::copy(&saved, run.out.join(layout.manifest()))
                 .with_context(|| format!("Cannot copy {}", saved.display()))?;
         }
@@ -1258,34 +1311,43 @@ mod tests {
         .unwrap();
         let modified = root.join("state/sources/nvd/modified.json.gz");
         std::fs::write(&modified, nvd_feed("2025-01-01T00:00:00.000", "2.57")).unwrap();
-        // Distribution data: one Debian advisory, other archives empty.
+        // Distribution data: a recent Debian 12 advisory and an old one of
+        // the ended Debian 10, other archives empty.
         let osv = root.join("state/sources/osv");
         std::fs::create_dir_all(&osv).unwrap();
-        for source in osv::SOURCES {
-            let slug = source.directory.to_ascii_lowercase().replace(' ', "-");
-            let mut zip = zip::ZipWriter::new(
-                std::fs::File::create(osv.join(format!("{slug}.zip"))).unwrap(),
-            );
-            if source.directory == "Debian" {
-                zip.start_file(
-                    "DEBIAN-CVE-2025-0003.json",
-                    zip::write::SimpleFileOptions::default(),
-                )
-                .unwrap();
-                zip.write_all(
-                    serde_json::json!({
-                        "id": "DEBIAN-CVE-2025-0003", "modified": "2025-01-01T00:00:00Z",
-                        "upstream": ["CVE-2025-0003"],
-                        "affected": [{"package": {"name": "openssh", "ecosystem": "Debian:12"},
-                            "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "1:9.2p1-2+deb12u3"}]}]}]
-                    })
-                    .to_string()
-                    .as_bytes(),
-                )
-                .unwrap();
+        let write_osv = |debian_12_published: &str| {
+            for source in osv::SOURCES {
+                let slug = source.directory.to_ascii_lowercase().replace(' ', "-");
+                let mut zip = zip::ZipWriter::new(
+                    std::fs::File::create(osv.join(format!("{slug}.zip"))).unwrap(),
+                );
+                if source.directory == "Debian" {
+                    for (id, release, published) in [
+                        ("DEBIAN-CVE-2025-0003", "12", debian_12_published),
+                        ("DEBIAN-CVE-2020-0001", "10", "2020-01-01T00:00:00Z"),
+                    ] {
+                        zip.start_file(
+                            format!("{id}.json"),
+                            zip::write::SimpleFileOptions::default(),
+                        )
+                        .unwrap();
+                        zip.write_all(
+                            serde_json::json!({
+                                "id": id, "modified": "2025-01-01T00:00:00Z", "published": published,
+                                "upstream": [id.strip_prefix("DEBIAN-").unwrap()],
+                                "affected": [{"package": {"name": "openssh", "ecosystem": format!("Debian:{release}")},
+                                    "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "1:9.2p1-2+deb12u3"}]}]}]
+                            })
+                            .to_string()
+                            .as_bytes(),
+                        )
+                        .unwrap();
+                    }
+                }
+                zip.finish().unwrap();
             }
-            zip.finish().unwrap();
-        }
+        };
+        write_osv(&Utc::now().to_rfc3339());
         let key = RsaPrivateKey::new(&mut rand::thread_rng(), 1024).unwrap();
         std::fs::write(
             root.join("key.pem"),
@@ -1312,13 +1374,22 @@ mod tests {
 
         build(args()).await.unwrap();
         let debian_manifest = std::fs::read(root.join("out/manifest-v2-linux-debian.rvf")).unwrap();
-        let debian = records_of(
-            &public,
-            &std::fs::read(root.join("out/snapshot-v2-linux-debian.rvf")).unwrap(),
-        );
-        assert!(debian.iter().any(|record| matches!(record,
-            Record::Affected(entry) if entry.product == "deb:debian:12:openssh"
-                && entry.affects("1:9.2p1-2+deb12u2") == Some(true))));
+        // Debian 12 has its own channel and stays in the legacy one; the
+        // ended Debian 10 is in neither.
+        for channel in ["linux-debian-12", "linux-debian"] {
+            let debian = records_of(
+                &public,
+                &std::fs::read(root.join(format!("out/snapshot-v2-{channel}.rvf"))).unwrap(),
+            );
+            assert!(debian.iter().any(|record| matches!(record,
+                Record::Affected(entry) if entry.product == "deb:debian:12:openssh"
+                    && entry.affects("1:9.2p1-2+deb12u2") == Some(true))));
+            assert!(!debian.iter().any(|record| matches!(record,
+                Record::Affected(entry) if entry.product.starts_with("deb:debian:10:"))));
+        }
+        assert!(!root.join("out/manifest-v2-linux-debian-10.rvf").exists());
+        // Legacy channels are published even without data.
+        assert!(root.join("out/manifest-v2-linux-ubuntu.rvf").exists());
         let main = records_of(
             &public,
             &std::fs::read(root.join("out/snapshot-v2-main.rvf")).unwrap(),
@@ -1371,6 +1442,18 @@ mod tests {
             &std::fs::read(root.join("out/delta-v2-main-1-2.rvf")).unwrap(),
         );
         assert_eq!(delta.len(), 1);
+        assert!(root.join("out/manifest-v2-linux-debian-12.rvf").exists());
+
+        // A year without Debian 12 advisories ends its channel: the next
+        // release no longer carries its manifest, and the state forgets it.
+        std::fs::remove_dir_all(root.join("out")).unwrap();
+        write_osv("2025-01-01T00:00:00Z");
+        build(args()).await.unwrap();
+        assert!(!root.join("out/manifest-v2-linux-debian-12.rvf").exists());
+        assert!(root.join("out/manifest-v2-linux-debian.rvf").exists());
+        let state: FeedState =
+            serde_json::from_slice(&std::fs::read(root.join("state/feed.json")).unwrap()).unwrap();
+        assert!(!state.channels.contains_key("linux-debian-12"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -33,9 +33,10 @@
 #   disabled = true                 # stop matching (false positives)
 #   curated = true                  # reviewed: no longer shown as inferred
 #
-# Linux packages are not listed: Debian, Ubuntu, RHEL, AlmaLinux and Rocky
-# Linux advisories (OSV.dev) cover every package of the releases in [linux],
-# published as separate channels.
+# Linux packages and releases are not listed: Debian, Ubuntu, RHEL,
+# AlmaLinux and Rocky Linux advisories (OSV.dev) cover every package. Each
+# release that had an advisory published in the past year gets a channel of
+# its own, so new releases appear without a change here.
 #
 # Windows releases are not listed either: they are derived from Microsoft's
 # CVE records ("Windows 11 Version 24H2" with 10.0.26100.x builds).
@@ -46,11 +47,6 @@
 # Office for Mac (MSRC builds such as 16.114.26101123 against bundle version
 # 16.114) and Visual Studio (MSRC 17.14.42 against installer builds
 # 17.14.36xxx).
-
-[linux]
-debian = ["11", "12", "13"]
-ubuntu = ["20.04", "22.04", "24.04"]
-rhel = ["8", "9", "10"]
 
 [[product]]
 key = "macos"

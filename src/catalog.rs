@@ -1,6 +1,6 @@
 //! Product catalog (catalog.toml): curated products with their endpoint
-//! matchers and CVE selectors, overrides of products inferred from CPE names,
-//! and the Linux releases published.
+//! matchers and CVE selectors, and overrides of products inferred from CPE
+//! names.
 use crate::feed::{Confidence, Matcher, Product};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -66,18 +66,6 @@ pub struct Override {
     pub curated: bool,
 }
 
-/// Linux releases whose distribution data is published.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Linux {
-    #[serde(default)]
-    pub debian: Vec<String>,
-    #[serde(default)]
-    pub ubuntu: Vec<String>,
-    /// RHEL major releases, also published for AlmaLinux and Rocky Linux.
-    #[serde(default)]
-    pub rhel: Vec<String>,
-}
-
 impl Entry {
     pub fn product(&self) -> Product {
         Product {
@@ -95,8 +83,6 @@ pub struct Catalog {
     pub products: Vec<Entry>,
     #[serde(default, rename = "override")]
     pub overrides: Vec<Override>,
-    #[serde(default)]
-    pub linux: Linux,
 }
 
 /// Whether two CPE "vendor:product" names are the same.

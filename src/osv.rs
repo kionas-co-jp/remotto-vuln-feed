@@ -2,13 +2,16 @@
 //! records and Red Hat, AlmaLinux and Rocky Linux errata. The first run reads
 //! each ecosystem's all.zip; later runs fetch only the records listed as
 //! changed in its modified_id.csv.
-use crate::catalog::Catalog;
-use crate::feed::{Confidence, Matcher, Product, Span, VersionScheme};
+//!
+//! Every release found in the records is kept; `active_releases` picks those
+//! still receiving advisories, so new releases need no catalog change.
+use crate::feed::{self, Confidence, Matcher, Product, Span, VersionScheme};
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::Read,
     path::{Path, PathBuf},
 };
@@ -78,6 +81,9 @@ pub struct Index {
     /// Newest modified_id.csv timestamp applied.
     pub modified: Option<String>,
     pub records: BTreeMap<String, Vec<Entry>>,
+    /// Publication time of each record in `records`.
+    #[serde(default)]
+    pub published: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -85,6 +91,8 @@ struct Record {
     id: String,
     #[serde(default)]
     modified: String,
+    #[serde(default)]
+    published: String,
     #[serde(default)]
     withdrawn: Option<String>,
     #[serde(default)]
@@ -118,15 +126,16 @@ struct Range {
     events: Vec<BTreeMap<String, String>>,
 }
 
+/// "26.04", "12", "9": a release number rather than a stream name.
+fn is_release(release: &str) -> bool {
+    release.starts_with(|c: char| c.is_ascii_digit())
+        && release.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+}
+
 /// Feed product key, matcher and stream for an OSV package, or None for
-/// releases the catalog does not publish (and Pro, EUS or debug packages).
-pub fn product(
-    catalog: &Catalog,
-    ecosystem: &str,
-    package: &str,
-) -> Option<(String, Matcher, Option<u32>)> {
+/// Pro, FIPS, EUS and debug packages.
+pub fn product(ecosystem: &str, package: &str) -> Option<(String, Matcher, Option<u32>)> {
     let parts: Vec<&str> = ecosystem.split(':').collect();
-    let releases = &catalog.linux;
     let deb = |distro: &str, release: &str| {
         (
             format!("deb:{distro}:{release}:{package}"),
@@ -153,30 +162,19 @@ pub fn product(
         return None;
     }
     match parts.as_slice() {
-        ["Debian", release] if releases.debian.iter().any(|r| r == release) => {
-            Some(deb("debian", release))
-        }
-        // "Ubuntu:24.04:LTS"; Pro and FIPS streams need a subscription.
-        ["Ubuntu", release] | ["Ubuntu", release, "LTS"]
-            if releases.ubuntu.iter().any(|r| r == release) =>
-        {
+        ["Debian", release] if is_release(release) => Some(deb("debian", release)),
+        // "Ubuntu:24.04:LTS", "Ubuntu:25.10"; Pro and FIPS streams need a
+        // subscription.
+        ["Ubuntu", release] | ["Ubuntu", release, "LTS"] if is_release(release) => {
             Some(deb("ubuntu", release))
         }
         // "Red Hat:enterprise_linux:9::appstream", "Red Hat:enterprise_linux:10.2".
         ["Red Hat", "enterprise_linux", version, ..] => {
             let (major, minor) = version.split_once('.').unwrap_or((version, "0"));
-            releases
-                .rhel
-                .iter()
-                .any(|r| r == major)
-                .then(|| rpm("rhel", major, minor.parse().ok()))
+            is_release(major).then(|| rpm("rhel", major, minor.parse().ok()))
         }
-        ["AlmaLinux", release] if releases.rhel.iter().any(|r| r == release) => {
-            Some(rpm("almalinux", release, None))
-        }
-        ["Rocky Linux", release] if releases.rhel.iter().any(|r| r == release) => {
-            Some(rpm("rocky", release, None))
-        }
+        ["AlmaLinux", release] if is_release(release) => Some(rpm("almalinux", release, None)),
+        ["Rocky Linux", release] if is_release(release) => Some(rpm("rocky", release, None)),
         _ => None,
     }
 }
@@ -222,9 +220,16 @@ fn span(start: Option<String>, end: Option<String>, end_inclusive: bool) -> Span
     }
 }
 
-/// ID, modification time and entries of one OSV record; no entries when it
-/// is withdrawn or names no published release.
-fn parse_record(json: &[u8], catalog: &Catalog) -> Result<(String, String, Vec<Entry>)> {
+/// One OSV record: its entries, none when it is withdrawn or names no
+/// supported distribution.
+struct Parsed {
+    id: String,
+    modified: String,
+    published: String,
+    entries: Vec<Entry>,
+}
+
+fn parse_record(json: &[u8]) -> Result<Parsed> {
     let record: Record = serde_json::from_slice(json).context("Invalid OSV record")?;
     let mut cves: Vec<String> = record
         .aliases
@@ -246,7 +251,7 @@ fn parse_record(json: &[u8], catalog: &Catalog) -> Result<(String, String, Vec<E
     if record.withdrawn.is_none() {
         for affected in &record.affected {
             let Some((product, _, stream)) =
-                product(catalog, &affected.package.ecosystem, &affected.package.name)
+                product(&affected.package.ecosystem, &affected.package.name)
             else {
                 continue;
             };
@@ -269,19 +274,57 @@ fn parse_record(json: &[u8], catalog: &Catalog) -> Result<(String, String, Vec<E
             }
         }
     }
-    Ok((record.id, record.modified, entries))
+    Ok(Parsed {
+        id: record.id,
+        modified: record.modified,
+        published: record.published,
+        entries,
+    })
 }
 
-fn apply(index: &mut Index, id: String, entries: Vec<Entry>) {
-    if entries.is_empty() {
-        index.records.remove(&id);
+fn apply(index: &mut Index, record: Parsed) {
+    if record.entries.is_empty() {
+        index.records.remove(&record.id);
+        index.published.remove(&record.id);
     } else {
-        index.records.insert(id, entries);
+        index.published.insert(record.id.clone(), record.published);
+        index.records.insert(record.id, record.entries);
     }
 }
 
+/// Distribution and release of a Linux product key ("deb:ubuntu:26.04:openssl").
+pub fn release_of(product: &str) -> Option<(&str, &str)> {
+    let mut parts = product.splitn(4, ':');
+    let (_, distro, release) = (parts.next()?, parts.next()?, parts.next()?);
+    Some((distro, release))
+}
+
+/// Releases with a record published since `since`. A distribution lists
+/// only the releases it still supports in new advisories, while old records
+/// keep being modified for every release they name, so publication rather
+/// than modification tells which releases are alive.
+pub fn active_releases(indexes: &[&Index], since: DateTime<Utc>) -> BTreeSet<(String, String)> {
+    let mut active = BTreeSet::new();
+    for index in indexes {
+        for (id, entries) in &index.records {
+            let recent = index
+                .published
+                .get(id)
+                .and_then(|published| DateTime::parse_from_rfc3339(published).ok())
+                .is_some_and(|published| published >= since);
+            if recent {
+                active.extend(entries.iter().filter_map(|entry| {
+                    release_of(&entry.product)
+                        .map(|(distro, release)| (distro.to_string(), release.to_string()))
+                }));
+            }
+        }
+    }
+    active
+}
+
 /// Reads every wanted record of an all.zip archive.
-pub fn read_archive(path: &Path, source: &Source, catalog: &Catalog) -> Result<Index> {
+pub fn read_archive(path: &Path, source: &Source) -> Result<Index> {
     let file =
         std::fs::File::open(path).with_context(|| format!("Cannot open {}", path.display()))?;
     let mut archive = zip::ZipArchive::new(file).context("Invalid OSV archive")?;
@@ -295,10 +338,9 @@ pub fn read_archive(path: &Path, source: &Source, catalog: &Catalog) -> Result<I
         }
         let mut json = Vec::new();
         file.read_to_end(&mut json)?;
-        let (id, modified, entries) =
-            parse_record(&json, catalog).with_context(|| format!("OSV {name}"))?;
-        newest = newest.max(modified);
-        apply(&mut index, id, entries);
+        let record = parse_record(&json).with_context(|| format!("OSV {name}"))?;
+        newest = newest.max(record.modified.clone());
+        apply(&mut index, record);
     }
     index.modified = (!newest.is_empty()).then_some(newest);
     Ok(index)
@@ -334,7 +376,6 @@ pub async fn update(
     cache: &Path,
     state: &Path,
     source: &Source,
-    catalog: &Catalog,
     full: bool,
     offline: bool,
 ) -> Result<Index> {
@@ -366,9 +407,8 @@ pub async fn update(
             for (_, id) in changed.iter().rev() {
                 match crate::sources::get(client, &source.url(&format!("{id}.json")), true).await {
                     Ok(json) => {
-                        let (id, _, entries) =
-                            parse_record(&json, catalog).with_context(|| format!("OSV {id}"))?;
-                        apply(&mut index, id, entries);
+                        let record = parse_record(&json).with_context(|| format!("OSV {id}"))?;
+                        apply(&mut index, record);
                     }
                     Err(error) => eprintln!("warning: OSV {id}: {error}"),
                 }
@@ -391,7 +431,7 @@ pub async fn update(
                 crate::sources::download(client, &source.url("all.zip"), &archive, offline).await?;
             }
             let previous = index.modified.take();
-            index = read_archive(&archive, source, catalog)?;
+            index = read_archive(&archive, source)?;
             if offline {
                 index.modified = previous.or(index.modified);
             }
@@ -456,7 +496,7 @@ pub fn merge(indexes: &[&Index]) -> BTreeMap<(String, String), Vec<Span>> {
 }
 
 /// Feed product for a Linux product key.
-pub fn feed_product(catalog: &Catalog, key: &str) -> Option<Product> {
+pub fn feed_product(key: &str) -> Option<Product> {
     let (kind, rest) = key.split_once(':')?;
     let (distro, rest) = rest.split_once(':')?;
     let (release, package) = rest.split_once(':')?;
@@ -468,17 +508,10 @@ pub fn feed_product(catalog: &Catalog, key: &str) -> Option<Product> {
         ("rpm", "rocky") => format!("Rocky Linux:{release}"),
         _ => return None,
     };
-    let (product_key, matcher, _) = product(catalog, &ecosystem, package)?;
-    let label = match distro {
-        "debian" => "Debian",
-        "ubuntu" => "Ubuntu",
-        "rhel" => "RHEL",
-        "almalinux" => "AlmaLinux",
-        _ => "Rocky Linux",
-    };
+    let (product_key, matcher, _) = product(&ecosystem, package)?;
     Some(Product {
         key: product_key,
-        name: format!("{package} ({label} {release})"),
+        name: format!("{package} ({})", feed::release_name(distro, release)),
         matchers: vec![matcher],
         confidence: Confidence::Curated,
     })
@@ -488,12 +521,8 @@ pub fn feed_product(catalog: &Catalog, key: &str) -> Option<Product> {
 mod tests {
     use super::*;
 
-    fn catalog() -> Catalog {
-        Catalog::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("catalog.toml")).unwrap()
-    }
-
     #[test]
-    fn records_become_entries_for_published_releases() {
+    fn records_become_entries_for_every_release() {
         let debian = serde_json::json!({
             "id": "DEBIAN-CVE-2024-6387", "modified": "2026-01-01T00:00:00Z",
             "upstream": ["CVE-2024-6387"],
@@ -504,12 +533,13 @@ mod tests {
                  "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}]}
             ]
         });
-        let (id, _, entries) = parse_record(debian.to_string().as_bytes(), &catalog()).unwrap();
+        let Parsed { id, entries, .. } = parse_record(debian.to_string().as_bytes()).unwrap();
         assert_eq!(id, "DEBIAN-CVE-2024-6387");
-        // Debian 14 is not a published release.
-        assert_eq!(entries.len(), 1);
+        // A release no list names yet (Debian 14) is kept too.
+        assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].cve, "CVE-2024-6387");
         assert_eq!(entries[0].product, "deb:debian:12:openssh");
+        assert_eq!(entries[1].product, "deb:debian:14:openssh");
         let entry = crate::feed::Affected {
             cve: entries[0].cve.clone(),
             product: entries[0].product.clone(),
@@ -527,13 +557,20 @@ mod tests {
             "affected": [
                 {"package": {"name": "openssh", "ecosystem": "Ubuntu:24.04:LTS"},
                  "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "1:9.6p1-3ubuntu13.3"}]}]},
+                {"package": {"name": "openssh", "ecosystem": "Ubuntu:25.10"},
+                 "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "1:10.0p1-5ubuntu5.1"}]}]},
                 {"package": {"name": "openssh", "ecosystem": "Ubuntu:Pro:16.04:LTS"},
+                 "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}]},
+                {"package": {"name": "openssh", "ecosystem": "Ubuntu:Pro:FIPS:22.04:LTS"},
                  "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}]}
             ]
         });
-        let (_, _, entries) = parse_record(ubuntu.to_string().as_bytes(), &catalog()).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].product, "deb:ubuntu:24.04:openssh");
+        let entries = parse_record(ubuntu.to_string().as_bytes()).unwrap().entries;
+        let products: Vec<&str> = entries.iter().map(|e| e.product.as_str()).collect();
+        assert_eq!(
+            products,
+            ["deb:ubuntu:24.04:openssh", "deb:ubuntu:25.10:openssh"]
+        );
 
         let redhat = serde_json::json!({
             "id": "RHSA-2024:0001", "upstream": ["CVE-2023-1", "CVE-2023-2"],
@@ -546,7 +583,7 @@ mod tests {
                  "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "0:115.6.0-1.el9_4"}]}]}
             ]
         });
-        let (_, _, entries) = parse_record(redhat.to_string().as_bytes(), &catalog()).unwrap();
+        let entries = parse_record(redhat.to_string().as_bytes()).unwrap().entries;
         let keys: Vec<(&str, &str)> = entries
             .iter()
             .map(|e| (e.cve.as_str(), e.product.as_str()))
@@ -564,15 +601,73 @@ mod tests {
             "affected": [{"package": {"name": "thunderbird", "ecosystem": "AlmaLinux:9"},
                 "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "115.6.0-1.el9_3.alma"}]}]}]
         });
-        let (_, _, entries) = parse_record(alma.to_string().as_bytes(), &catalog()).unwrap();
+        let entries = parse_record(alma.to_string().as_bytes()).unwrap().entries;
         assert_eq!(entries[0].product, "rpm:almalinux:9:thunderbird");
 
         let withdrawn = serde_json::json!({"id": "RHSA-1", "withdrawn": "2024-01-01T00:00:00Z",
             "upstream": ["CVE-1"], "affected": redhat["affected"]});
-        assert!(parse_record(withdrawn.to_string().as_bytes(), &catalog())
+        assert!(parse_record(withdrawn.to_string().as_bytes())
             .unwrap()
-            .2
+            .entries
             .is_empty());
+    }
+
+    #[test]
+    fn releases_with_recent_advisories_are_active() {
+        let entry = |product: &str| Entry {
+            cve: "CVE-1".into(),
+            product: product.into(),
+            spans: vec![span(None, Some("1.0".into()), false)],
+            stream: None,
+        };
+        let mut index = Index::default();
+        // An old record still names the ended release next to a live one...
+        for (id, published, products) in [
+            (
+                "UBUNTU-CVE-2021-1",
+                "2021-02-18T00:00:00Z",
+                vec!["deb:ubuntu:16.04:openssl", "deb:ubuntu:24.04:openssl"],
+            ),
+            // ...but only supported releases appear in new ones.
+            (
+                "UBUNTU-CVE-2026-1",
+                "2026-10-14T12:30:00.5Z",
+                vec!["deb:ubuntu:24.04:curl", "deb:ubuntu:26.04:curl"],
+            ),
+        ] {
+            apply(
+                &mut index,
+                Parsed {
+                    id: id.into(),
+                    modified: "2026-10-31T00:00:00Z".into(),
+                    published: published.into(),
+                    entries: products.into_iter().map(entry).collect(),
+                },
+            );
+        }
+        let since = DateTime::parse_from_rfc3339("2025-11-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let active: Vec<(String, String)> = active_releases(&[&index], since).into_iter().collect();
+        assert_eq!(
+            active,
+            [
+                ("ubuntu".to_string(), "24.04".to_string()),
+                ("ubuntu".to_string(), "26.04".to_string())
+            ]
+        );
+        // A withdrawn record leaves the index with its publication time.
+        apply(
+            &mut index,
+            Parsed {
+                id: "UBUNTU-CVE-2026-1".into(),
+                modified: String::new(),
+                published: String::new(),
+                entries: Vec::new(),
+            },
+        );
+        assert!(!index.published.contains_key("UBUNTU-CVE-2026-1"));
+        assert!(active_releases(&[&index], since).is_empty());
     }
 
     #[test]
@@ -640,14 +735,15 @@ mod tests {
 
     #[test]
     fn linux_product_keys_round_trip() {
-        let product = feed_product(&catalog(), "deb:ubuntu:24.04:openssh").unwrap();
+        let product = feed_product("deb:ubuntu:24.04:openssh").unwrap();
         assert_eq!(product.name, "openssh (Ubuntu 24.04)");
         assert!(matches!(
             &product.matchers[0],
             Matcher::DebPackage { distro, release, source }
                 if distro == "ubuntu" && release == "24.04" && source == "openssh"
         ));
-        assert!(feed_product(&catalog(), "rpm:rocky:9:kernel").is_some());
-        assert!(feed_product(&catalog(), "rpm:rhel:6:kernel").is_none());
+        assert!(feed_product("rpm:rocky:9:kernel").is_some());
+        assert!(feed_product("deb:ubuntu:25.10:openssh").is_some());
+        assert!(feed_product("rpm:fedora:40:kernel").is_none());
     }
 }

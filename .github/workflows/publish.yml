@@ -1,7 +1,7 @@
 # Builds the vulnerability feed four times a day and publishes each new
 # version as a GitHub Release. Remotto Server reads
 #   https://github.com/<owner>/<repo>/releases/latest/download/manifest-v2-main.rvf
-# (and the manifest-v2-linux-*.rvf channels of the distributions it manages)
+# (and the manifest-v2-linux-*.rvf channels of the Linux releases it manages)
 # and downloads only the deltas it lists.
 name: Publish vulnerability feed
 
